@@ -11,7 +11,6 @@ use eyre::Result;
 use std::str::FromStr;
 use url::Url;
 
-
 sol! {
     #[allow(missing_docs)]
     #[sol(rpc)]
@@ -135,7 +134,6 @@ pub struct SwapParams {
     pub hashlock: FixedBytes<32>,
 }
 
-
 #[derive(Clone)]
 pub struct FillOrderParams {
     pub order: ILimitOrderProtocol::Order,
@@ -161,15 +159,18 @@ impl EthereumConfig {
         let private_key =
             std::env::var("PRIVATE_KEY_ETH").expect("PRIVATE_KEY_ETH not set in .env file");
         let lop_address = match std::env::var("LOOP_ADDRESS") {
-            Ok(address) => Address::from_str(&address).unwrap_or_else(|err| panic!("LOOP_ADDRESS {err:?}")),
+            Ok(address) => {
+                Address::from_str(&address).unwrap_or_else(|err| panic!("LOOP_ADDRESS {err:?}"))
+            }
             Err(err) => panic!("LOOP_ADDRESS {err:?}"),
         };
         let escrow_factory_address = match std::env::var("ESCROW_FACTORY_ADDRESS") {
-            Ok(address) => Address::from_str(&address).unwrap_or_else(|err| panic!("ESCROW_FACTORY_ADDRESS {err:?}")),
+            Ok(address) => Address::from_str(&address)
+                .unwrap_or_else(|err| panic!("ESCROW_FACTORY_ADDRESS {err:?}")),
             Err(err) => panic!("ESCROW_FACTORY_ADDRESS {err:?}"),
         };
         let chain_id = match std::env::var("CHAIN_ID") {
-            Ok(id) => u64::from_str(&id).unwrap_or_else(|err|panic!("CHAIN_ID {err:?}")),
+            Ok(id) => u64::from_str(&id).unwrap_or_else(|err| panic!("CHAIN_ID {err:?}")),
             Err(err) => panic!("CHAIN_ID {err:?}"),
         };
         Self { rpc_url, private_key, lop_address, escrow_factory_address, chain_id }
@@ -190,7 +191,6 @@ impl EthClient {
     }
 
     pub async fn fill_order(&self, order_params: FillOrderParams) -> Result<FixedBytes<32>> {
-
         let provider = self.create_provider()?;
         let lop = ILimitOrderProtocol::new(self.config.lop_address, &provider);
         let tx_hash = lop
@@ -246,14 +246,12 @@ impl EthClient {
     }
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use alloy::{
         node_bindings::{Anvil, AnvilInstance},
-        primitives::{address, U256},
+        primitives::{U256, address},
         providers::ext::AnvilApi,
     };
     use eyre::Result;
@@ -267,7 +265,8 @@ mod tests {
             .expect("Failed to spawn anvil instance")
     });
 
-    const TEST_PRIVATE_KEY: &str = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+    const TEST_PRIVATE_KEY: &str =
+        "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
     const TEST_ADDRESS: Address = address!("f39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
 
     fn get_test_config() -> EthereumConfig {
@@ -282,14 +281,18 @@ mod tests {
 
     async fn setup_token_balances(provider: &impl Provider) -> Result<()> {
         let whale = address!("aD354CfBAa4A8572DD6Df021514a3931A8329Ef5");
-        
-        provider.anvil_set_balance(whale, U256::from(100) * U256::from(10).pow(U256::from(18))).await?;
-       // provider.anvil_impersonate_account(whale).await?;
-        
+        let whale_balance = provider.get_balance(TEST_ADDRESS).await?;
+        println!("whale_balance: {whale_balance:?}");
+        assert!(whale_balance.gt(&U256::from(0)));
+        provider
+            .anvil_set_balance(whale, U256::from(100) * U256::from(10).pow(U256::from(18)))
+            .await?;
+        // provider.anvil_impersonate_account(whale).await?;
+
         //let usdc = IERC20::new(address!("A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"), &provider);
         //let _= usdc.transfer(TEST_ADDRESS, U256::from(1000000000)).send().await?;
-        
-      //  provider.anvil_stop_impersonating_account(whale).await?;
+
+        //  provider.anvil_stop_impersonating_account(whale).await?;
         Ok(())
     }
 
@@ -297,7 +300,7 @@ mod tests {
     async fn test_fill_order_usdc_eth() -> Result<()> {
         let config = get_test_config();
         let client = EthClient::new(config);
-                    let provider = client.create_provider()?;
+        let provider = client.create_provider()?;
 
         setup_token_balances(&provider).await?;
 
@@ -331,7 +334,7 @@ mod tests {
     async fn test_fill_order_eth_usdc() -> Result<()> {
         let config = get_test_config();
         let client = EthClient::new(config);
-            let provider = client.create_provider()?;
+        let provider = client.create_provider()?;
         setup_token_balances(&provider).await?;
 
         let order = ILimitOrderProtocol::Order {
@@ -353,19 +356,17 @@ mod tests {
             taker_traits: U256::ZERO,
             args: Bytes::new(),
         };
-    
-        match client.fill_order(fill_params).await  {
-            Ok(results)=> {
+
+        match client.fill_order(fill_params).await {
+            Ok(results) => {
                 let Some(reciept) = provider.get_transaction_receipt(results).await? else {
                     panic!("error getting reciept test_fill_order_eth_usdc")
                 };
-                let status:bool = reciept.status().into();
+                let status: bool = reciept.status().into();
                 assert!(status)
-                
-            },
-            Err(err)=> panic!("test_fill_order_eth_usdc failed {err:?}")
+            }
+            Err(err) => panic!("test_fill_order_eth_usdc failed {err:?}"),
         }
-
 
         Ok(())
     }
@@ -374,7 +375,6 @@ mod tests {
     async fn test_get_escrow_address() -> Result<()> {
         let config = get_test_config();
         let client = EthClient::new(config);
-
         let hashlock_bytes = hex::decode("6c9a2f9a94770336403e69e9ea5d88c97ef3b78a")?;
         let mut hashlock_array = [0u8; 32];
         hashlock_array[..hashlock_bytes.len()].copy_from_slice(&hashlock_bytes);
@@ -417,7 +417,7 @@ mod tests {
         };
 
         let escrow_address = client.get_escrow_address(immutables.clone()).await?;
-        
+
         let secret_bytes = hex::decode("6c9a2f9a94770336403e69e9ea5d88c97ef3b78a")?;
         let mut secret_array = [0u8; 32];
         secret_array[..secret_bytes.len()].copy_from_slice(&secret_bytes);
