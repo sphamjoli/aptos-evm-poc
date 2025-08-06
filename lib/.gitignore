@@ -1,0 +1,11 @@
+# Rust-specific
+/target/
+
+# IDE-specific (common)
+.idea/
+.vscode/
+*.iml
+
+# OS-specific
+.DS_Store
+Thumbs.db

@@ -1,0 +1,19 @@
+[package]
+name = "hashlock"
+version = "1.0.0"
+authors = []
+
+[addresses]
+hashlock = "0x2bf575cf878af0255b26f5c49768311ad81dd61426c6cdcdbb55a7eac7f8d0ce"
+deployer = "0x2bf575cf878af0255b26f5c49768311ad81dd61426c6cdcdbb55a7eac7f8d0ce"
+
+[dev-addresses]
+hashlock = "0x01"
+deployer = "0x02"
+
+[dependencies.AptosFramework]
+git = "https://github.com/aptos-labs/aptos-framework.git"
+rev = "mainnet"
+subdir = "aptos-framework"
+
+[dev-dependencies]
