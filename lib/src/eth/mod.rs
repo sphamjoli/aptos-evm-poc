@@ -139,6 +139,18 @@ sol! {
         uint256 safetyDeposit;
         uint256 chainId;
     }
+
+    struct CreateEscrowParams {
+        bytes32 hashlock;
+        address maker;
+        address taker;
+        address token;
+        uint256 amount;
+        uint256 safety_deposit;
+        uint256 timelock;
+        uint64 dst_chain_id;
+    }
+
     event EscrowCancelled();
     event EscrowWithdrawal(bytes32 secret);
     event SrcEscrowCreated(Immutables srcImmutables, DstImmutablesComplement dstImmutablesComplement);
@@ -154,6 +166,8 @@ sol! {
 }
 
 use AggregationRouterV6::Order;
+
+use crate::eth::IEscrowFactory::{CreateEscrowParams, Immutables};
 
 #[derive(Clone, Debug, Default)]
 pub struct EthereumConfig {
@@ -203,30 +217,20 @@ impl EthereumConfig {
         Self { rpc_url, private_key, lop_address, escrow_factory_address, chain_id, weth }
     }
 
-    fn load_from_env() -> Self {
+    pub fn load_from_env() -> Self {
         let rpc_url = std::env::var("RPC_URL").expect("RPC_URL not set in ENVIRONMENT");
         let private_key =
             std::env::var("PRIVATE_KEY_ETH").expect("PRIVATE_KEY_ETH not set in ENVIRONMENT");
-        let lop_address = match std::env::var("LOOP_ADDRESS") {
-            Ok(address) => {
-                EthAddress::from_str(&address).unwrap_or_else(|err| panic!("LOOP_ADDRESS {err:?}"))
-            }
-            Err(err) => panic!("LOOP_ADDRESS not set in ENVIRONMENT error: {err:?}"),
-        };
-        let escrow_factory_address = match std::env::var("ESCROW_FACTORY_ADDRESS") {
-            Ok(address) => EthAddress::from_str(&address)
-                .unwrap_or_else(|err| panic!("ESCROW_FACTORY_ADDRESS {err:?}")),
-            Err(err) => panic!("ESCROW_FACTORY_ADDRESS not set in ENVIRONMENT error:{err:?}"),
-        };
-        let chain_id = match std::env::var("CHAIN_ID") {
-            Ok(id) => u64::from_str(&id).unwrap_or_else(|err| panic!("CHAIN_ID {err:?}")),
-            Err(err) => panic!("CHAIN_ID not set in ENVIRONMENT error:{err:?}"),
-        };
-
-        let weth = match std::env::var("WETH") {
-            Ok(id) => EthAddress::from_str(&id).unwrap_or_else(|err| panic!("WETH {err:?}")),
-            Err(err) => panic!("WETH not set in ENVIRONMENT error:{err:?}"),
-        };
+        let lop_address =
+            EthAddress::from_str(&std::env::var("LOOP_ADDRESS").expect("LOOP_ADDRESS not set"))
+                .unwrap();
+        let escrow_factory_address = EthAddress::from_str(
+            &std::env::var("ESCROW_FACTORY_ADDRESS").expect("ESCROW_FACTORY_ADDRESS not set"),
+        )
+        .unwrap();
+        let chain_id =
+            u64::from_str(&std::env::var("CHAIN_ID").expect("CHAIN_ID not set")).unwrap();
+        let weth = EthAddress::from_str(&std::env::var("WETH").expect("WETH not set")).unwrap();
         Self { rpc_url, private_key, lop_address, escrow_factory_address, chain_id, weth }
     }
 }
@@ -236,27 +240,28 @@ impl EthClient {
         Self { config }
     }
 
-    fn create_provider(&self) -> Result<impl Provider> {
-        let url = Url::parse(&self.config.rpc_url)
-            .unwrap_or_else(|err| panic!("Error converting rpc url {err:?}"));
+    pub fn create_provider(&self) -> Result<impl Provider> {
+        let url = Url::parse(&self.config.rpc_url)?;
         let pk_signer: PrivateKeySigner = self.config.private_key.parse()?;
         let wallet = EthereumWallet::new(pk_signer);
         Ok(ProviderBuilder::new().wallet(wallet).connect_http(url))
     }
 
-    fn eth_address_to_custom_address(addr: EthAddress) -> U256 {
+    pub fn eth_address_to_custom_address(addr: EthAddress) -> U256 {
         U256::from_be_bytes(addr.into_word().0)
+    }
+
+    pub fn custom_address_to_eth_address(addr: U256) -> EthAddress {
+        EthAddress::from_word(FixedBytes::from_slice(&addr.to_be_bytes::<32>()))
     }
 
     pub fn create_maker_traits_with_allowed_sender(allowed_sender: Option<EthAddress>) -> U256 {
         let mut traits = ALLOW_MULTIPLE_FILLS_FLAG;
-
         if let Some(sender) = allowed_sender {
             let sender_u160 = U256::from_be_bytes(sender.into_word().0);
             let mask = U256::from((1u128 << 80) - 1);
             traits |= sender_u160 & mask;
         }
-
         traits
     }
 
@@ -289,41 +294,30 @@ impl EthClient {
     pub async fn get_order_hash(&self, order: &Order) -> Result<FixedBytes<32>> {
         let provider = self.create_provider()?;
         let lop = AggregationRouterV6::new(self.config.lop_address, &provider);
-
         let order_hash = lop.hashOrder(order.clone()).call().await?;
-        println!("order_hash: {:?}", order_hash.clone());
-
         Ok(order_hash)
     }
 
     pub async fn sign_order(&self, order: &Order) -> Result<(FixedBytes<32>, FixedBytes<32>)> {
         let order_hash = self.get_order_hash(order).await?;
-
         let signer: PrivateKeySigner = self.config.private_key.parse()?;
-
         let signature = signer.sign_hash(&order_hash).await?;
-
         let r = signature.r();
         let mut s = signature.s();
         let v = signature.v();
-
         if v {
             s |= U256::from(1) << 255;
         }
-
         let r_bytes = FixedBytes::from_slice(&r.to_be_bytes::<32>());
         let vs_bytes = FixedBytes::from_slice(&s.to_be_bytes::<32>());
-
         Ok((r_bytes, vs_bytes))
     }
 
     pub async fn fill_order(&self, order_params: FillOrderParams) -> Result<FixedBytes<32>> {
         let provider = self.create_provider()?;
         let lop = AggregationRouterV6::new(self.config.lop_address, &provider);
-
         let weth_address = Self::eth_address_to_custom_address(self.config.weth);
         let is_eth_taker = order_params.order.takerAsset == weth_address;
-
         let mut call = lop.fillOrder(
             order_params.order.clone(),
             order_params.r,
@@ -331,13 +325,61 @@ impl EthClient {
             order_params.amount,
             order_params.taker_traits,
         );
-
         if is_eth_taker {
             call = call.value(order_params.amount);
+        }
+        let tx_hash = call.send().await?.watch().await?;
+        Ok(tx_hash)
+    }
+
+    pub async fn create_dst_escrow(&self, params: CreateEscrowParams) -> Result<FixedBytes<32>> {
+        let provider = self.create_provider()?;
+        let escrow_factory = IEscrowFactory::new(self.config.escrow_factory_address, &provider);
+
+        let immutables = Immutables {
+            orderHash: FixedBytes::ZERO,
+            hashlock: params.hashlock,
+            maker: Self::eth_address_to_custom_address(params.maker),
+            taker: Self::eth_address_to_custom_address(params.taker),
+            token: Self::eth_address_to_custom_address(params.token),
+            amount: params.amount,
+            safetyDeposit: params.safety_deposit,
+            timelocks: params.timelock,
+        };
+
+        let mut call = escrow_factory.createDstEscrow(immutables, params.timelock);
+
+        if params.token == self.config.weth {
+            call = call.value(params.amount + params.safety_deposit);
         }
 
         let tx_hash = call.send().await?.watch().await?;
         Ok(tx_hash)
+    }
+
+    pub async fn withdraw_from_escrow(
+        &self,
+        secret: FixedBytes<32>,
+        immutables: Immutables,
+    ) -> Result<FixedBytes<32>> {
+        let provider = self.create_provider()?;
+        let escrow_factory = IEscrowFactory::new(self.config.escrow_factory_address, &provider);
+        let tx_hash = escrow_factory.withdraw(secret, immutables).send().await?.watch().await?;
+        Ok(tx_hash)
+    }
+
+    pub async fn get_escrow_src_address(&self, immutables: Immutables) -> Result<EthAddress> {
+        let provider = self.create_provider()?;
+        let escrow_factory = IEscrowFactory::new(self.config.escrow_factory_address, &provider);
+        let address = escrow_factory.addressOfEscrowSrc(immutables).call().await?;
+        Ok(address)
+    }
+
+    pub async fn get_escrow_dst_address(&self, immutables: Immutables) -> Result<EthAddress> {
+        let provider = self.create_provider()?;
+        let escrow_factory = IEscrowFactory::new(self.config.escrow_factory_address, &provider);
+        let address = escrow_factory.addressOfEscrowDst(immutables).call().await?;
+        Ok(address)
     }
 
     pub async fn watch_escrow_events(&self, from_block: Option<u64>) -> Result<Vec<Log>> {
@@ -345,31 +387,38 @@ impl EthClient {
             .address(self.config.escrow_factory_address)
             .from_block(from_block.unwrap_or(0));
         let provider = self.create_provider()?;
-
         let logs = provider.get_logs(&filter).await?;
         Ok(logs)
     }
 
-    pub async fn get_escrow_address(
+    pub async fn approve_token(
         &self,
-        immutables: IEscrowFactory::Immutables,
-    ) -> Result<EthAddress> {
+        token: EthAddress,
+        spender: EthAddress,
+        amount: U256,
+    ) -> Result<FixedBytes<32>> {
         let provider = self.create_provider()?;
+        let token_contract = IERC20::new(token, &provider);
+        let tx_hash = token_contract.approve(spender, amount).send().await?.watch().await?;
+        Ok(tx_hash)
+    }
 
-        let escrow_factory = IEscrowFactory::new(self.config.escrow_factory_address, &provider);
-
-        let address = escrow_factory.addressOfEscrowSrc(immutables).call().await?;
-
-        Ok(address)
+    pub async fn get_token_balance(&self, token: EthAddress, account: EthAddress) -> Result<U256> {
+        let provider = self.create_provider()?;
+        let token_contract = IERC20::new(token, &provider);
+        let balance = token_contract.balanceOf(account).call().await?;
+        Ok(balance)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::eth::IEscrowFactory::CreateEscrowParams;
+
     use super::*;
     use alloy::{
         node_bindings::{Anvil, AnvilInstance},
-        primitives::{U160, U256, address, aliases::U24},
+        primitives::{U160, U256, address, aliases::U24, keccak256},
         providers::ext::AnvilApi,
     };
     use eyre::Result;
@@ -384,6 +433,7 @@ mod tests {
     const USDC_ADDRESS: EthAddress = address!("A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
     const SWAP_ROUTER_ADDRESS: EthAddress = address!("E592427A0AEce92De3Edee1F18E0157C05861564");
     const WETH_ADDRESS: EthAddress = address!("C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2");
+
     static ANVIL_INSTANCE: LazyLock<AnvilInstance> = LazyLock::new(|| {
         Anvil::new()
             .fork("https://gateway.tenderly.co/public/mainnet")
@@ -391,6 +441,35 @@ mod tests {
             .try_spawn()
             .expect("Failed to spawn anvil instance")
     });
+
+    sol! {
+        #[sol(rpc)]
+        interface IWETH9 {
+            function deposit() external payable;
+            function withdraw(uint256 wad) external;
+            function balanceOf(address account) external view returns (uint256);
+            function approve(address spender, uint256 amount) external returns (bool);
+        }
+
+        #[sol(rpc)]
+        interface ISwapRouter {
+            struct ExactInputSingleParams {
+                address tokenIn;
+                address tokenOut;
+                uint24 fee;
+                address recipient;
+                uint256 deadline;
+                uint256 amountIn;
+                uint256 amountOutMinimum;
+                uint160 sqrtPriceLimitX96;
+            }
+
+            function exactInputSingle(
+                ExactInputSingleParams calldata params
+            ) external payable returns (uint256 amountOut);
+        }
+    }
+
     fn get_test_config(private_key: &str) -> EthereumConfig {
         EthereumConfig {
             rpc_url: ANVIL_INSTANCE.endpoint().into(),
@@ -520,6 +599,9 @@ mod tests {
 
         assert_ne!(converted, U256::ZERO);
         assert_eq!(converted, U256::from_be_bytes(test_addr.into_word().0));
+
+        let back_converted = EthClient::custom_address_to_eth_address(converted);
+        assert_eq!(back_converted, test_addr);
 
         Ok(())
     }
@@ -834,11 +916,109 @@ mod tests {
             timelocks: U256::from(300),
         };
 
-        let escrow_address1 = client1.get_escrow_address(immutables.clone()).await?;
-        let escrow_address2 = client2.get_escrow_address(immutables).await?;
+        let escrow_address1 = client1.get_escrow_src_address(immutables.clone()).await?;
+        let escrow_address2 = client2.get_escrow_src_address(immutables).await?;
 
         assert_ne!(escrow_address1, EthAddress::ZERO);
         assert_eq!(escrow_address1, escrow_address2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_create_escrow_and_withdraw() -> Result<()> {
+        let client = EthClient::new(get_test_config(TEST_PRIVATE_KEY));
+        let secret = FixedBytes::from([1u8; 32]);
+        let hashlock = keccak256(secret.as_slice());
+
+        let params = CreateEscrowParams {
+            hashlock,
+            maker: TEST_ADDRESS,
+            taker: TEST_ADDRESS_2,
+            token: USDC_ADDRESS,
+            amount: U256::from(1000000),
+            safety_deposit: U256::from(100000),
+            timelock: U256::from(1000000000),
+            dst_chain_id: 1,
+        };
+
+        let immutables = Immutables {
+            orderHash: FixedBytes::ZERO,
+            hashlock,
+            maker: EthClient::eth_address_to_custom_address(params.maker),
+            taker: EthClient::eth_address_to_custom_address(params.taker),
+            token: EthClient::eth_address_to_custom_address(params.token),
+            amount: params.amount,
+            safetyDeposit: params.safety_deposit,
+            timelocks: params.timelock,
+        };
+
+        let escrow_address = client.get_escrow_dst_address(immutables.clone()).await?;
+        assert_ne!(escrow_address, EthAddress::ZERO);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_escrow_address_computation() -> Result<()> {
+        let client = EthClient::new(get_test_config(TEST_PRIVATE_KEY));
+        let hashlock = keccak256(b"test");
+
+        let immutables = Immutables {
+            orderHash: FixedBytes::ZERO,
+            hashlock,
+            maker: U256::from(1),
+            taker: U256::from(2),
+            token: U256::from(3),
+            amount: U256::from(1000),
+            safetyDeposit: U256::from(100),
+            timelocks: U256::from(1000000),
+        };
+
+        let src_address = client.get_escrow_src_address(immutables.clone()).await?;
+        let dst_address = client.get_escrow_dst_address(immutables).await?;
+
+        assert_ne!(src_address, EthAddress::ZERO);
+        assert_ne!(dst_address, EthAddress::ZERO);
+        assert_ne!(src_address, dst_address);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_evm_only_escrow_flow() -> Result<()> {
+        let client = EthClient::new(get_test_config(TEST_PRIVATE_KEY));
+        let secret = FixedBytes::from([42u8; 32]);
+        let hashlock = keccak256(secret.as_slice());
+
+        let maker = EthAddress::from([1u8; 20]);
+        let taker = EthAddress::from([2u8; 20]);
+        let token = EthAddress::from([3u8; 20]);
+
+        let params = CreateEscrowParams {
+            hashlock,
+            maker,
+            taker,
+            token,
+            amount: U256::from(5000000),
+            safety_deposit: U256::from(500000),
+            timelock: U256::from(2000000000),
+            dst_chain_id: 31337,
+        };
+
+        let immutables = Immutables {
+            orderHash: FixedBytes::ZERO,
+            hashlock,
+            maker: EthClient::eth_address_to_custom_address(maker),
+            taker: EthClient::eth_address_to_custom_address(taker),
+            token: EthClient::eth_address_to_custom_address(token),
+            amount: params.amount,
+            safetyDeposit: params.safety_deposit,
+            timelocks: params.timelock,
+        };
+
+        let escrow_address = client.get_escrow_dst_address(immutables).await?;
+        assert_ne!(escrow_address, EthAddress::ZERO);
+
         Ok(())
     }
 }
